@@ -1,0 +1,112 @@
+name: iOS isolated Simulator data retention validation
+
+on:
+  workflow_dispatch:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  ST_IOS_SIM_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+
+jobs:
+  data-retention:
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ios-app/package-lock.json
+            ios-app/nodejs-project/package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app/nodejs-project ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare frontend, runtime and Capacitor project
+        run: npm --prefix ios-app run sync:ios
+      - name: Data validator, fixture and Simulator selection safeguards
+        run: |
+          node --experimental-vm-modules --test --test-concurrency=1 \
+            ios-app/tests/ci-simulator-template.test.mjs \
+            ios-app/tests/simulator-data.test.mjs \
+            ios-app/tests/simulator-data-fixture.test.mjs \
+            ios-app/tests/simulator-transfer.test.mjs
+      - name: Build the unsigned Simulator app
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios-app/ios/build-data-validation CODE_SIGNING_ALLOWED=NO build
+      - name: Select the existing idle iPhone 17 Pro template without booting it
+        id: template
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/st-ios-data-validation"
+          mkdir -p "$evidence"
+          node ios-app/scripts/bounded-simctl.mjs --phase list-template --timeout-ms 120000 -- list --json \
+            > "$evidence/simulators.json"
+          node --input-type=module - "$evidence/simulators.json" <<'NODE'
+          import fs from 'node:fs';
+          import { selectCITemplate } from './ios-app/scripts/ci-simulator-template.mjs';
+          const listing = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const template = selectCITemplate(listing, process.env.ST_IOS_SIM_RUNTIME);
+          if (template.state !== 'Shutdown') throw new Error('The data-only template must be idle before the owned fixture is created.');
+          const manifest = JSON.parse(fs.readFileSync('ios-app/nodejs-project-deploy/runtime-manifest.json', 'utf8'));
+          if (manifest.formatVersion !== 1 || manifest.applicationVersion !== '1.19.0'
+            || !/^[a-f0-9]{64}$/.test(manifest.deploymentId)) throw new Error('Synchronized runtime manifest is invalid.');
+          const environment = {
+            sourceRevision: process.env.GITHUB_SHA,
+            developerDirectory: process.env.DEVELOPER_DIR,
+            runnerNodeArchitecture: process.arch,
+            requiredRuntime: process.env.ST_IOS_SIM_RUNTIME,
+            applicationVersion: manifest.applicationVersion,
+            deploymentId: manifest.deploymentId,
+            template,
+          };
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/st-ios-data-validation/simulator-environment.json`,
+            JSON.stringify(environment, null, 2) + '\n');
+          fs.appendFileSync(process.env.GITHUB_ENV, `ST_IOS_DATA_TEMPLATE_UDID=${template.udid}\n`);
+          NODE
+      - name: Validate data transfer, retention and controlled upgrade on an owned Simulator
+        if: ${{ steps.template.outcome == 'success' }}
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/st-ios-data-validation"
+          app_path="$GITHUB_WORKSPACE/ios-app/ios/build-data-validation/Build/Products/Debug-iphonesimulator/App.app"
+          test -d "$app_path"
+          node ios-app/scripts/create-upgrade-variant.mjs --source-app "$app_path" \
+            --output-root "$RUNNER_TEMP/st-ios-data-upgrade-validation"
+          cp "$RUNNER_TEMP/st-ios-data-upgrade-validation/upgrade-variant.json" \
+            "$evidence/upgrade-variant.json"
+          node ios-app/scripts/validate-simulator-data.mjs \
+            --udid "$ST_IOS_DATA_TEMPLATE_UDID" \
+            --app "$app_path" --upgrade-app "$RUNNER_TEMP/st-ios-data-upgrade-validation/UpgradeB.app" \
+            --report "$evidence/data-retention.json"
+      - name: Upload data validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-data-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-data-validation/*.json
+            ${{ runner.temp }}/st-ios-data-validation/*.png
+            ${{ runner.temp }}/st-ios-data-validation/screenshots
+          retention-days: 14
+          if-no-files-found: warn

@@ -1,0 +1,194 @@
+/* Applied only when the native iOS app injects its startup marker. */
+html.st-ios {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    scroll-behavior: auto;
+}
+
+body.st-ios {
+    --topBarBlockSize: calc(var(--topBarIconSize) + var(--topBarBlockPadding) + env(safe-area-inset-top, 0px));
+    --st-safe-top: env(safe-area-inset-top, 0px);
+    --st-safe-left: env(safe-area-inset-left, 0px);
+    --st-safe-right: env(safe-area-inset-right, 0px);
+    --st-safe-bottom: env(safe-area-inset-bottom, 0px);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--st-viewport-height, 100dvh);
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+body.st-ios.st-ios-keyboard {
+    --st-safe-bottom: 0px;
+}
+
+/* Include the notch once in the existing toolbar height. */
+body.st-ios #top-settings-holder {
+    position: fixed;
+    top: var(--st-viewport-offset-top, 0px);
+    padding-top: env(safe-area-inset-top, 0px);
+}
+
+body.st-ios #top-bar {
+    position: fixed;
+    top: var(--st-viewport-offset-top, 0px);
+    height: var(--topBarBlockSize);
+}
+
+body.st-ios #top-settings-holder .drawer-content {
+    /* Safari's upstream drawer rule uses top: 0 and a 36px margin. Keep
+       these toolbar drawers below its measured safe-area height instead.
+       Important bounds also cover maximized and saved inline positions. */
+    position: fixed;
+    top: calc(var(--st-viewport-offset-top, 0px) + var(--topBarBlockSize)) !important;
+    margin-top: 0 !important;
+    max-height: max(0px, calc(var(--st-viewport-height, 100dvh) - var(--topBarBlockSize) - var(--st-safe-bottom))) !important;
+}
+
+body.st-ios #top-settings-holder,
+body.st-ios #sheld {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+}
+
+body.st-ios:not(.waifuMode) #sheld {
+    /* Anchor to the viewport independently of document auto-scroll. WebKit can
+       pan to a focused field even after our keyboard height has been applied. */
+    position: fixed;
+    top: calc(var(--st-viewport-offset-top, 0px) + var(--topBarBlockSize));
+    height: calc(var(--st-viewport-height, 100dvh) - var(--topBarBlockSize) - 1px);
+    max-height: calc(var(--st-viewport-height, 100dvh) - var(--topBarBlockSize) - 1px);
+}
+
+body.st-ios #send_form {
+    padding-bottom: var(--st-safe-bottom);
+}
+
+body.st-ios #chat {
+    min-height: 0;
+    max-height: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+}
+
+/* Right-aligned, non-wrapping actions can clip the first extension buttons.
+   Keep each toolbar within the message and wrap whole buttons onto new rows.
+   Leave display to the existing menu, editing and generation handlers. */
+body.st-ios #chat .mes_buttons,
+body.st-ios #chat .extraMesButtons,
+body.st-ios #chat .mes_edit_buttons {
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 4px;
+    overflow: visible;
+}
+
+body.st-ios #chat .extraMesButtons {
+    /* Share the row with Edit/checkpoint actions instead of pushing each of
+       those buttons onto its own line after the expanded group. */
+    flex: 1 1 0;
+}
+
+body.st-ios #chat .mes_buttons > .mes_button,
+body.st-ios #chat .extraMesButtons > *,
+body.st-ios #chat .mes_edit_buttons > .menu_button {
+    flex-shrink: 0;
+}
+
+/* WKWebView's dvh can retain the full screen height while its keyboard covers
+   the lower portion. Center dialogs inside the measured visual viewport, also
+   accounting for the viewport pan WebKit uses when it focuses an input. */
+body.st-ios .popup[open] {
+    --st-dialog-gap: 12px;
+    position: fixed;
+    inset:
+        calc(var(--st-viewport-offset-top, 0px) + var(--st-safe-top) + var(--st-dialog-gap))
+        calc(var(--st-viewport-inset-right, 0px) + var(--st-safe-right) + var(--st-dialog-gap))
+        calc(var(--st-viewport-inset-bottom, 0px) + var(--st-safe-bottom) + var(--st-dialog-gap))
+        calc(var(--st-viewport-offset-left, 0px) + var(--st-safe-left) + var(--st-dialog-gap));
+    margin: auto;
+    box-sizing: border-box;
+    height: fit-content;
+    min-height: 0;
+    min-width: 0;
+    max-height: calc(var(--st-viewport-height, 100dvh) - var(--st-safe-top) - var(--st-safe-bottom) - 2 * var(--st-dialog-gap));
+    /* The upstream large-dialog rule has an important max-width. */
+    max-width: calc(var(--st-viewport-width, 100dvw) - var(--st-safe-left) - var(--st-safe-right) - 2 * var(--st-dialog-gap)) !important;
+}
+
+/* Remove the upstream fit-content/95dvh constraints, including the Safari
+   variant. Only the explanation shrinks and scrolls; input and buttons stay
+   visible even during first-run onboarding with the keyboard already open. */
+body.st-ios .popup[open] .popup-body {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    flex: 1 1 auto;
+}
+
+body.st-ios .popup[open] .popup-content {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+body.st-ios .popup[open] .popup-input,
+body.st-ios .popup[open] .popup-inputs,
+body.st-ios .popup[open] .popup-controls {
+    flex-shrink: 0;
+}
+
+body.st-ios button,
+body.st-ios input,
+body.st-ios select,
+body.st-ios textarea,
+body.st-ios a {
+    touch-action: manipulation;
+}
+
+/* This selector follows and outranks the generic input rule. Let the native
+   range control handle dragging without a page pan taking over the gesture. */
+body.st-ios input[type="range"] {
+    touch-action: none;
+}
+
+body.st-ios input[type="range"]::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+}
+
+body.st-ios input[type="text"],
+body.st-ios input[type="password"],
+body.st-ios input[type="search"],
+body.st-ios input[type="email"],
+body.st-ios textarea,
+body.st-ios select {
+    /* Some input containers use an icon font size. Use the user's text size
+       instead, with a 16px floor to prevent WebKit's focus zoom. */
+    font-size: max(16px, var(--mainFontSize, 16px));
+}
+
+body.st-ios #send_textarea {
+    /* Small fontScale values also shrink the upstream icon-based input height.
+       Leave room for one text line, 12px padding and the 3px progress border.
+       em is supported by the app's iOS 15 minimum deployment target. */
+    min-height: max(calc(var(--bottomFormBlockSize) + 2px), calc(1.5em + 15px));
+}
+
+body.st-ios .mes_text {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+body.st-ios .avatar-container,
+body.st-ios .character_select,
+body.st-ios button {
+    -webkit-user-select: none;
+    user-select: none;
+}

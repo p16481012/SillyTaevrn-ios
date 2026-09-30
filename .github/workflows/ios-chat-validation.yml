@@ -1,0 +1,118 @@
+name: iOS native chat generation, save and cold relaunch
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  ST_IOS_SIM_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+
+jobs:
+  chat-profiles:
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [iphone-small-en, ipad-en, iphone-ko]
+    runs-on: macos-15
+    timeout-minutes: 65
+    env:
+      ST_CHAT_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ios-app/package-lock.json
+            ios-app/nodejs-project/package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app/nodejs-project ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare frontend, runtime and Capacitor project
+        run: npm --prefix ios-app run sync:ios
+      - name: Chat fixture, transport and Simulator ownership checks
+        run: node --experimental-vm-modules --test --test-concurrency=1 ios-app/tests/ci-simulator-template.test.mjs ios-app/tests/simulator-runner.test.mjs ios-app/tests/simulator-chat.test.mjs ios-app/tests/simulator-ui.test.mjs
+      - name: Build the unsigned app and native UI runner
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios-app/ios/build-chat-validation CODE_SIGNING_ALLOWED=NO build-for-testing
+      - name: Select an available iPhone template and built XCTest configuration
+        id: template
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/st-ios-chat-validation"
+          xcrun simctl list --json > "$RUNNER_TEMP/st-ios-chat-template.json"
+          node --input-type=module - "$RUNNER_TEMP/st-ios-chat-template.json" <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { selectCITemplate } from './ios-app/scripts/ci-simulator-template.mjs';
+          const listing = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const template = selectCITemplate(listing, process.env.ST_IOS_SIM_RUNTIME);
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/st-ios-chat-validation/simulator-environment.json`, JSON.stringify({
+            sourceRevision: process.env.GITHUB_SHA, developerDirectory: process.env.DEVELOPER_DIR, template,
+          }, null, 2) + '\n');
+          const products = path.resolve('ios-app/ios/build-chat-validation/Build/Products');
+          const runs = fs.readdirSync(products).filter(name => name.endsWith('.xctestrun'));
+          if (!template || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(template.udid) || runs.length !== 1) {
+            throw new Error('One available iPhone template and one built xctestrun are required.');
+          }
+          fs.appendFileSync(process.env.GITHUB_ENV,
+            `ST_CHAT_TEMPLATE_UDID=${template.udid}\nST_CHAT_XCTESTRUN=${path.join(products, runs[0])}\n`);
+          NODE
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
+      - name: Run actual chat generation, cancellation, save and cold relaunch on selected profile
+        if: ${{ steps.template.outcome == 'success' }}
+        timeout-minutes: 50
+        run: |
+          set -euo pipefail
+          node ios-app/scripts/validate-simulator-chat.mjs \
+            --template-udid "$ST_CHAT_TEMPLATE_UDID" \
+            --app "$GITHUB_WORKSPACE/ios-app/ios/build-chat-validation/Build/Products/Debug-iphonesimulator/App.app" \
+            --xctestrun "$ST_CHAT_XCTESTRUN" \
+            --output-root "$RUNNER_TEMP/st-ios-chat-validation/profiles" \
+            --profile "$ST_CHAT_PROFILE"
+      - name: Upload generated chat results and unmodified native screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-chat-${{ matrix.profile }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-chat-validation/simulator-environment.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/chat-validation.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/profile-result.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/fixture-contract.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/provider-observations.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/chat-original.jsonl
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/chat-after-api-read.jsonl
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/chat-restored-api.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/chat-observations.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/startup.log
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/ui-summary.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/xcodebuild*.json
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/xcodebuild.log
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/failure-chat.jsonl
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/failure-screen.png
+            ${{ runner.temp }}/st-ios-chat-validation/profiles/*/screenshots
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Upload complete native chat XCTest bundles
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-chat-xcresults-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/st-ios-chat-validation/profiles/*/UI-tests.xcresult
+          retention-days: 7
+          if-no-files-found: warn

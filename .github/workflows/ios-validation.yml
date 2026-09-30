@@ -1,0 +1,257 @@
+name: iOS source, backend, data and device build validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_data_and_device:
+        description: Run Simulator data retention and unsigned device build after core validation
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      run_data_and_device:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  ST_IOS_SIM_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+
+jobs:
+  validate:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ios-app/package-lock.json
+            ios-app/nodejs-project/package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app/nodejs-project ci --ignore-scripts --no-audit --no-fund
+          npm --prefix tests install --ignore-scripts --package-lock=false --no-audit --no-fund
+      - name: Upstream unit regression tests
+        run: npm --prefix tests run test:unit -- --runInBand
+      - name: Prepare frontend, runtime and Capacitor project
+        run: npm --prefix ios-app run sync:ios
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18.20.4'
+      - name: Record the actual embedded-runtime host executable
+        run: echo "ST_TEST_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+      - name: Install Chromium for actual frontend checks
+        run: |
+          node tests/node_modules/playwright-core/cli.js install chromium
+          node --input-type=module -e "import { chromium } from './tests/node_modules/playwright-core/index.mjs'; console.log('ST_CHROMIUM_PATH=' + chromium.executablePath());" >> "$GITHUB_ENV"
+          echo 'ST_BROWSER_SMOKE=1' >> "$GITHUB_ENV"
+      - name: Serial iOS compatibility, Node 18 JITless and representative-data tests
+        # Both real-backend tests own port 8000; never run them concurrently.
+        run: node --experimental-vm-modules --test --test-concurrency=1 ios-app/tests/*.test.mjs
+      - name: Actual Swift Foundation diagnostic export privacy and filesystem checks
+        run: |
+          mkdir -p "$RUNNER_TEMP/st-ios-validation"
+          node ios-app/scripts/validate-diagnostics-helper.mjs \
+            --report "$RUNNER_TEMP/st-ios-validation/diagnostics-helper.json"
+      - name: Actual packaged backend API forwarding and frontend error checks
+        run: |
+          mkdir -p "$RUNNER_TEMP/st-ios-validation"
+          node ios-app/scripts/validate-api.mjs --host-node "$ST_TEST_NODE" \
+            --report "$RUNNER_TEMP/st-ios-validation/api-host.json"
+          node ios-app/scripts/validate-api-browser.mjs --host-node "$ST_TEST_NODE" \
+            --chromium "$ST_CHROMIUM_PATH" --report "$RUNNER_TEMP/st-ios-validation/api-browser.json"
+      - name: Unsigned iOS simulator build
+        run: |
+          xcodebuild -version
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath ios-app/ios/build-validation CODE_SIGNING_ALLOWED=NO build
+      - name: Boot Simulator and install and launch the native backend
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator_list="$RUNNER_TEMP/st-ios-simulators.json"
+          node ios-app/scripts/bounded-simctl.mjs --phase list --timeout-ms 120000 -- list --json > "$simulator_list"
+          selection="$(node --input-type=module - "$simulator_list" <<'NODE'
+          import fs from 'node:fs';
+          import { selectCITemplate } from './ios-app/scripts/ci-simulator-template.mjs';
+          const listing = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const device = selectCITemplate(listing, process.env.ST_IOS_SIM_RUNTIME);
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/st-ios-validation/simulator-environment.json`, JSON.stringify({
+            sourceRevision: process.env.GITHUB_SHA, developerDirectory: process.env.DEVELOPER_DIR, template: device,
+          }, null, 2) + '\n');
+          console.log(`${device.udid} ${device.state}`);
+          NODE
+          )"
+          read -r simulator_id simulator_state <<< "$selection"
+          echo "ST_IOS_SIMULATOR_UDID=$simulator_id" >> "$GITHUB_ENV"
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
+          if [ "$simulator_state" = 'Shutdown' ]; then
+            node ios-app/scripts/bounded-simctl.mjs --phase boot --timeout-ms 120000 -- boot "$simulator_id"
+          fi
+          node ios-app/scripts/bounded-simctl.mjs --phase bootstatus --timeout-ms 600000 -- bootstatus "$simulator_id" -b
+          app_path='ios-app/ios/build-validation/Build/Products/Debug-iphonesimulator/App.app'
+          test -d "$app_path"
+          node ios-app/scripts/bounded-simctl.mjs --phase install --timeout-ms 120000 -- install "$simulator_id" "$app_path"
+          node ios-app/scripts/bounded-simctl.mjs --phase launch --timeout-ms 120000 -- launch "$simulator_id" com.sillytavern.ios
+
+      - name: Native simulator backend health and deployment validation
+        id: native
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator_id="$ST_IOS_SIMULATOR_UDID"
+          health_file="$RUNNER_TEMP/st-ios-validation/native-health.json"
+          startup_log=''
+          if data_directory="$(node ios-app/scripts/bounded-simctl.mjs --phase get-container --timeout-ms 15000 -- get_app_container "$simulator_id" com.sillytavern.ios data)" \
+            && [ -n "$data_directory" ]; then
+            startup_log="$data_directory/Library/Application Support/logs/startup.log"
+          else
+            echo '::warning::App container lookup unavailable; continuing the strict native health check.'
+          fi
+          manifest_file='ios-app/nodejs-project-deploy/runtime-manifest.json'
+          deadline=$((SECONDS + 180))
+          echo '[native-health] poll-start budgetSeconds=180'
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            remaining=$((deadline - SECONDS))
+            request_timeout=3
+            if [ "$remaining" -lt "$request_timeout" ]; then request_timeout="$remaining"; fi
+            if curl --noproxy '*' --silent --fail --max-time "$request_timeout" \
+              --output "$health_file" http://127.0.0.1:8000/api/ios/health \
+              && node - "$health_file" "$manifest_file" <<'NODE'
+          const fs = require('node:fs');
+          try {
+            const health = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+            const manifest = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+            if (health.ready !== true || health.version !== '1.19.0'
+              || manifest.formatVersion !== 1 || manifest.applicationVersion !== '1.19.0'
+              || !/^[a-f0-9]{64}$/.test(manifest.deploymentId)
+              || health.deploymentId !== manifest.deploymentId) process.exit(1);
+            console.log(`Native backend ready: ${health.version}, deployment ${health.deploymentId}`);
+          } catch { process.exit(1); }
+          NODE
+            then
+              exit 0
+            fi
+            if [ -n "$startup_log" ] && [ -f "$startup_log" ] && grep -q 'STARTUP FAILED:' "$startup_log"; then
+              echo '::error::Native backend reported startup failure; inspect the startup log step.'
+              exit 1
+            fi
+            remaining=$((deadline - SECONDS))
+            if [ "$remaining" -le 0 ]; then break; fi
+            if [ "$remaining" -gt 2 ]; then remaining=2; fi
+            sleep "$remaining"
+          done
+          echo '::error::Native Simulator backend did not become ready with the expected deployment within 180 seconds.'
+          exit 1
+      - name: Embedded native backend API forwarding, Unicode, errors and cancellation
+        if: ${{ !cancelled() && steps.native.outcome == 'success' }}
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/st-ios-validation"
+          deployment_id="$(node --input-type=module -e "import fs from 'node:fs'; console.log(JSON.parse(fs.readFileSync('ios-app/nodejs-project-deploy/runtime-manifest.json')).deploymentId);")"
+          node ios-app/scripts/validate-api.mjs --base-url http://127.0.0.1:8000 \
+            --deployment-id "$deployment_id" --report "$RUNNER_TEMP/st-ios-validation/api-native.json"
+      # All three first-run/lifecycle UI profiles run in ios-ui-validation.yml.
+      # Keep that host independent so a stalled UI service cannot poison data checks.
+      - name: Preserve backend screen and shut down its Simulator before data checks
+        if: ${{ !cancelled() && steps.native.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/st-ios-validation"
+          mkdir -p "$evidence"
+          node ios-app/scripts/bounded-simctl.mjs --phase screenshot --timeout-ms 20000 -- io "$ST_IOS_SIMULATOR_UDID" screenshot "$evidence/final-screen.png" || true
+          node ios-app/scripts/bounded-simctl.mjs --phase shutdown-before-data --timeout-ms 30000 -- shutdown "$ST_IOS_SIMULATOR_UDID"
+      - name: Simulator runtime repair, data transfer and retention
+        if: ${{ inputs.run_data_and_device && !cancelled() && steps.native.outcome == 'success' }}
+        # The last complete 14-scenario run took 16m28s. Allow headroom while
+        # the validator's own deadlines retain an actionable failure report.
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/st-ios-validation"
+          app_path="$GITHUB_WORKSPACE/ios-app/ios/build-validation/Build/Products/Debug-iphonesimulator/App.app"
+          node ios-app/scripts/create-upgrade-variant.mjs --source-app "$app_path" \
+            --output-root "$RUNNER_TEMP/st-ios-upgrade-validation"
+          cp "$RUNNER_TEMP/st-ios-upgrade-validation/upgrade-variant.json" \
+            "$RUNNER_TEMP/st-ios-validation/upgrade-variant.json"
+          node ios-app/scripts/validate-simulator-data.mjs \
+            --udid "$ST_IOS_SIMULATOR_UDID" \
+            --app "$app_path" --upgrade-app "$RUNNER_TEMP/st-ios-upgrade-validation/UpgradeB.app" \
+            --report "$RUNNER_TEMP/st-ios-validation/data-retention.json"
+      - name: Build and package an unsigned physical-device trial
+        if: ${{ inputs.run_data_and_device && !cancelled() && steps.native.outcome == 'success' }}
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath ios-app/ios/build-device-validation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+          node ios-app/scripts/package-unsigned-device.mjs \
+            --app "$GITHUB_WORKSPACE/ios-app/ios/build-device-validation/Build/Products/Release-iphoneos/App.app" \
+            --output-root "$RUNNER_TEMP/st-ios-unsigned-device"
+          cp "$RUNNER_TEMP/st-ios-unsigned-device/unsigned-device-build.json" \
+            "$RUNNER_TEMP/st-ios-validation/unsigned-device-build.json"
+      - name: Upload unsigned IPA and signing-required metadata
+        if: ${{ always() && inputs.run_data_and_device }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-device-build-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-unsigned-device/*.ipa
+            ${{ runner.temp }}/st-ios-unsigned-device/unsigned-device-build.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload Simulator screenshots and validation results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-validation/screenshots
+            ${{ runner.temp }}/st-ios-validation/*.json
+            ${{ runner.temp }}/st-ios-validation/final-screen.png
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Read native startup log on validation failure
+        if: ${{ failure() && env.ST_IOS_SIMULATOR_UDID != '' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_directory="$(node ios-app/scripts/bounded-simctl.mjs --phase diagnostic-container --timeout-ms 15000 -- get_app_container "$ST_IOS_SIMULATOR_UDID" com.sillytavern.ios data || true)"
+          if [ -n "$data_directory" ] && [ -f "$data_directory/Library/Application Support/logs/startup.log" ]; then
+            cat "$data_directory/Library/Application Support/logs/startup.log"
+          else
+            echo 'Native startup.log is unavailable; the app may not have reached its Node bootstrap.'
+          fi
+          node ios-app/scripts/bounded-simctl.mjs --phase diagnostic-log --timeout-ms 25000 -- spawn "$ST_IOS_SIMULATOR_UDID" log show --last 5m --style compact \
+            --predicate 'process == "App"' 2>&1 | tail -n 120 || true
+      - name: Stop native Simulator app
+        if: ${{ always() && env.ST_IOS_SIMULATOR_UDID != '' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          node ios-app/scripts/bounded-simctl.mjs --phase cleanup-terminate --timeout-ms 20000 -- terminate "$ST_IOS_SIMULATOR_UDID" com.sillytavern.ios || true
+          node ios-app/scripts/bounded-simctl.mjs --phase cleanup-shutdown --timeout-ms 30000 -- shutdown "$ST_IOS_SIMULATOR_UDID" || true

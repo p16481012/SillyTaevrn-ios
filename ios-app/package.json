@@ -1,0 +1,29 @@
+{
+  "name": "sillytavern-ios-app",
+  "version": "1.19.0",
+  "description": "SillyTavern iOS shell — nodejs-mobile + Capacitor",
+  "main": "index.js",
+  "scripts": {
+    "prepare:ios": "node scripts/prepare-ios.mjs",
+    "sync:ios": "node scripts/prepare-ios.mjs --sync",
+    "sync": "npm run sync:ios",
+    "open": "cap open ios",
+    "build": "npm run sync:ios && cap open ios",
+    "test:adapters": "node --test tests/adapters.test.mjs tests/manifest.test.mjs",
+    "test:ios-ui": "node --experimental-vm-modules --test tests/ios-init.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "AGPL-3.0",
+  "type": "commonjs",
+  "dependencies": {
+    "@capacitor/core": "8.3.0",
+    "@capacitor/ios": "8.3.0",
+    "@choreruiz/capacitor-node-js": "1.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.3.0",
+    "esbuild": "0.27.3"
+  },
+  "engines": { "node": ">=22" }
+}

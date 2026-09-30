@@ -1,0 +1,115 @@
+name: iOS small iPhone, iPad and Korean UI validation
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  ST_IOS_SIM_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+
+jobs:
+  ui-profiles:
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [iphone-small-en, ipad-en, iphone-ko]
+    runs-on: macos-15
+    timeout-minutes: 55
+    env:
+      ST_UI_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ios-app/package-lock.json
+            ios-app/nodejs-project/package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app/nodejs-project ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare frontend, runtime and Capacitor project
+        run: npm --prefix ios-app run sync:ios
+      - name: Profile selection and viewport helper checks
+        run: node --experimental-vm-modules --test ios-app/tests/ci-simulator-template.test.mjs ios-app/tests/simulator-runner.test.mjs ios-app/tests/simulator-ui.test.mjs ios-app/tests/ios-init.test.mjs
+      - name: Actual Swift Foundation diagnostic export privacy and filesystem checks
+        run: |
+          mkdir -p "$RUNNER_TEMP/st-ios-ui-validation"
+          node ios-app/scripts/validate-diagnostics-helper.mjs \
+            --report "$RUNNER_TEMP/st-ios-ui-validation/diagnostics-helper.json"
+      - name: Build unsigned app and UI runner once
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios-app/ios/build-validation CODE_SIGNING_ALLOWED=NO build-for-testing
+      - name: Select the native UI profile and built XCTest configuration
+        id: profiles
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/st-ios-ui-validation"
+          xcrun simctl list --json > "$RUNNER_TEMP/st-ios-ui-template.json"
+          node --input-type=module - "$RUNNER_TEMP/st-ios-ui-template.json" <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { selectCITemplate } from './ios-app/scripts/ci-simulator-template.mjs';
+          const listing = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const device = selectCITemplate(listing, process.env.ST_IOS_SIM_RUNTIME);
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/st-ios-ui-validation/simulator-environment.json`, JSON.stringify({
+            sourceRevision: process.env.GITHUB_SHA, developerDirectory: process.env.DEVELOPER_DIR, template: device,
+          }, null, 2) + '\n');
+          const products = path.resolve('ios-app/ios/build-validation/Build/Products');
+          const runs = fs.readdirSync(products).filter(name => name.endsWith('.xctestrun'));
+          if (!device || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(device.udid) || runs.length !== 1) {
+            throw new Error('One available iPhone template and one built xctestrun are required.');
+          }
+          fs.appendFileSync(process.env.GITHUB_ENV, `ST_UI_TEMPLATE_UDID=${device.udid}\nST_UI_XCTESTRUN=${path.join(products, runs[0])}\n`);
+          NODE
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
+      - name: Execute selected native UI profile and retain independent results
+        if: ${{ steps.profiles.outcome == 'success' }}
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          node ios-app/scripts/validate-simulator-ui.mjs \
+            --template-udid "$ST_UI_TEMPLATE_UDID" \
+            --app "$GITHUB_WORKSPACE/ios-app/ios/build-validation/Build/Products/Debug-iphonesimulator/App.app" \
+            --xctestrun "$ST_UI_XCTESTRUN" \
+            --output-root "$RUNNER_TEMP/st-ios-ui-validation/profiles" \
+            --profile "$ST_UI_PROFILE"
+      - name: Upload native UI profile screenshots and summaries
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-profiles-${{ matrix.profile }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-ui-validation/simulator-environment.json
+            ${{ runner.temp }}/st-ios-ui-validation/diagnostics-helper.json
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/ui-profiles.json
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/*/screenshots
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/*/ui-summary.json
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/*/profile-result.json
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/*/xcodebuild*.json
+            ${{ runner.temp }}/st-ios-ui-validation/profiles/*/xcodebuild.log
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Upload complete native profile XCTest bundles
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ui-profile-xcresults-${{ matrix.profile }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/st-ios-ui-validation/profiles/*/UI-tests.xcresult
+          retention-days: 7
+          if-no-files-found: warn

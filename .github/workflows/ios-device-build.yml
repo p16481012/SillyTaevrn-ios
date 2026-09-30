@@ -1,0 +1,66 @@
+name: iOS unsigned device build only
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  unsigned-device-build:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ios-app/package-lock.json
+            ios-app/nodejs-project/package-lock.json
+      - name: Install pinned dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app ci --ignore-scripts --no-audit --no-fund
+          npm --prefix ios-app/nodejs-project ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare frontend, runtime and Capacitor project
+        run: npm --prefix ios-app run sync:ios
+      - name: Build unsigned iPhoneOS application
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project ios-app/ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath ios-app/ios/build-device-validation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Package unsigned IPA and source metadata
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$GITHUB_WORKSPACE/ios-app/ios/build-device-validation/Build/Products/Release-iphoneos/App.app"
+          node ios-app/scripts/package-unsigned-device.mjs \
+            --app "$app_path" \
+            --output-root "$RUNNER_TEMP/st-ios-unsigned-device"
+          plutil -convert json -o "$RUNNER_TEMP/st-ios-unsigned-device/built-info.json" "$app_path/Info.plist"
+      - name: Upload unsigned IPA and signing-required metadata
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-device-build-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/st-ios-unsigned-device/*.ipa
+            ${{ runner.temp }}/st-ios-unsigned-device/unsigned-device-build.json
+            ${{ runner.temp }}/st-ios-unsigned-device/built-info.json
+          retention-days: 7
+          if-no-files-found: warn

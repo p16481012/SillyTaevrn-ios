@@ -1,0 +1,23 @@
+name: iOS complete pre-device validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Each suite receives a fresh host and the same source revision. Data retention
+# gets the first and only booted Simulator on its host; IPA packaging has none.
+jobs:
+  backend-core:
+    uses: ./.github/workflows/ios-validation.yml
+    with:
+      run_data_and_device: false
+  data-retention:
+    uses: ./.github/workflows/ios-data-validation.yml
+  device-build:
+    uses: ./.github/workflows/ios-device-build.yml
+  ui-profiles:
+    uses: ./.github/workflows/ios-ui-validation.yml
+  chat-profiles:
+    uses: ./.github/workflows/ios-chat-validation.yml

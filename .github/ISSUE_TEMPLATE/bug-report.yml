@@ -1,0 +1,87 @@
+name: 오류 제보
+description: SillyTavern iOS의 설치·실행·사용 중 발생한 문제를 알려주세요.
+title: '[오류] '
+body:
+  - type: markdown
+    attributes:
+      value: |
+        이 양식은 [p16481012/SillyTaevrn-ios](https://github.com/p16481012/SillyTaevrn-ios)의 오류 제보용입니다. 한국어로 작성해도 됩니다.
+        공개 이슈에 API 키, 인증서, 원본 대화, 캐릭터 카드 전체, 개인 서버 주소를 올리지 마세요. 재현에는 짧은 시험 문장을 사용해주세요.
+
+  - type: input
+    id: version
+    attributes:
+      label: 앱 버전·빌드와 설치 파일
+      description: 확인할 수 있는 앱 버전, 빌드 번호, 받은 IPA 파일명 또는 Release 주소를 적어주세요.
+      placeholder: '예: 1.19.0 / 빌드 10194 / 받은 IPA 파일명'
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: 기기와 iOS·iPadOS 버전
+      description: 기기 모델과 설정 → 일반 → 정보에서 확인한 OS 버전을 적어주세요. 시뮬레이터라면 함께 표시해주세요.
+      placeholder: '예: iPhone 15 / iOS 18.6'
+    validations:
+      required: true
+
+  - type: input
+    id: installation
+    attributes:
+      label: 설치 방법
+      description: 사용한 서명·설치 도구와 새 설치인지 기존 앱 업데이트인지 알려주세요. 설치 문제라면 PC 운영체제도 적어주세요.
+      placeholder: '예: Windows / Sideloadly / 기존 앱 위에 업데이트'
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 재현 순서와 결과
+      description: 누른 버튼, 기대한 결과, 실제 결과, 발생 빈도를 순서대로 적어주세요. 데이터가 없어졌다면 마지막으로 정상 저장한 시점도 알려주세요.
+      placeholder: |
+        1. 앱을 실행하고 …
+        2. … 버튼을 누름
+        기대한 결과:
+        실제 결과와 화면의 오류 문구:
+        발생 빈도:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: extensions
+    attributes:
+      label: 외부 확장을 껐을 때의 결과
+      description: 설치한 외부 확장을 비활성화하고 앱을 완전히 종료·재실행해 비교해주세요. 설정이나 데이터를 삭제할 필요는 없습니다.
+      options:
+        - 외부 확장을 사용하지 않음
+        - 외부 확장을 꺼도 동일하게 발생함
+        - 외부 확장을 끄면 정상 작동함
+        - 아직 비교하지 못함
+        - 앱 설치·실행 문제라 확인할 수 없음
+    validations:
+      required: true
+
+  - type: textarea
+    id: api-and-extension
+    attributes:
+      label: API·확장 정보
+      description: 관련이 있다면 API 제공자·모델, 일반 채팅의 정상 작동 여부, 외부 확장의 정확한 이름·저장소 주소·버전을 적어주세요. API 키와 개인 접속 주소는 제외해주세요.
+      placeholder: '예: OpenAI / 모델 이름 / 일반 채팅은 정상 / 확장 저장소 주소'
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 진단 정보·화면
+      description: 필요한 경우 앱의 진단 정보 내보내기로 만든 JSON이나 오류 화면을 첨부해주세요. 첨부 전에 내용을 확인하고 개인정보를 가려주세요. 설치·빌드 오류는 해당 부분의 로그만 첨부해주세요.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 제출 전 확인
+      options:
+        - label: '[기존 이슈](https://github.com/p16481012/SillyTaevrn-ios/issues)에서 같은 문제가 보고되었는지 확인했습니다.'
+          required: true
+        - label: 공개해도 되는 시험 자료만 사용했으며 API 키·인증 정보·개인 대화를 제거했습니다.
+          required: true
